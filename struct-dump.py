@@ -34,6 +34,9 @@ def extractTypeNumber(input):
     input = input[1:-1]
     return int(input, 16)
 
+def extractCount(input):
+    input = input.strip()
+    return (int(input, 10) + 1)
 
 def parseTypedef(file, offset, properties):
     name = ''
@@ -75,7 +78,6 @@ def parseStruct(file, offset, properties):
 
     while entry['level'] == 2:
         member = {}
-
         if 'DW_AT_name' in entry['properties'] and 'DW_AT_type' in entry['properties']:
             name = extractName(entry['properties']['DW_AT_name'])
 
@@ -107,17 +109,45 @@ def parseType(offset, properties):
     typeEntry['type'] = 'base'
     entries[offset] = typeEntry
 
+def parseArray(file, offset, properties):
+
+    arrayEntry = {}
+    arrayEntry['name'] = extractTypeNumber(properties['DW_AT_sibling'])
+    arrayEntry['type'] = 'array'
+    arrayEntry['baseType'] = extractTypeNumber(properties['DW_AT_type'])
+    arrayEntry['sibling'] = extractTypeNumber(properties['DW_AT_sibling'])
+
+    entry = parseEntry(file)
+    filePos = file.tell()
+
+    while entry['level'] == 2:
+        if 'DW_AT_upper_bound' in entry['properties']:
+            arrayEntry['count'] = extractCount(entry['properties']['DW_AT_upper_bound'])
+
+        filePos = file.tell()
+        entry = parseEntry(file)
+
+    file.seek(filePos)
+    entries[offset] = arrayEntry
+
 def parseEntry(file):
     line = file.readline()
 
-    match = re.match( r' <(\w+)><(\w+)>: Abbrev Number: \w+ \((\w+)\)', line)
+    match = re.match( r' <(\w+)><(\w+)>: Abbrev Number: \w+( \((\w+)\))?', line)
 
     if not match:
         return False
 
     level = int(match.group(1))
     offset = int(match.group(2), 16)
-    type = match.group(3)
+    if match.group(4) is not None:
+        type = match.group(4)
+    else: 
+        type = 'None'
+        return {'offset': offset,
+                'level': level,
+                'type': type,
+                'properties': {}}
 
     filePosition = file.tell()
     counter = 0
@@ -150,6 +180,7 @@ def parseLevelOne(file):
     entry = parseEntry(file)
 
     while entry and entry['level'] != 0:
+
         if not entry:
             print("Failed to parse entry")
             return False
@@ -160,6 +191,8 @@ def parseLevelOne(file):
             parseStruct(file, entry['offset'], entry['properties'])
         elif entry['type'] == 'DW_TAG_typedef':
             parseTypedef(file, entry['offset'], entry['properties'])
+        elif entry['type'] == 'DW_TAG_array_type':
+            parseArray(file, entry['offset'], entry['properties'])
 
         filePos = file.tell()
         entry = parseEntry(file)
@@ -179,8 +212,21 @@ def lookupType(input):
         return (entry['name'], 'baseType')
     elif entry['type'] == 'struct':
         return (entry['name'], 'struct')
+    elif entry['type'] == 'array':
+        return lookupType(entry['baseType'])
 
     return (False, '')
+
+def lookupCount(input):
+    if input not in entries:
+        return (False, '')
+
+    entry = entries[input]
+    if 'count' in entry:
+        return entry['count']
+    else:
+        return 1
+
 
 def generateStructJson(offset):
     jsonStruct = {}
@@ -190,9 +236,12 @@ def generateStructJson(offset):
 
     for memberName in struct['members']:
         (name, variant) = lookupType(struct['members'][memberName]['type'])
+        count = lookupCount(struct['members'][memberName]['type'])
 
         if name:
-            jsonStruct[memberName] = {'type': name, 'offset': struct['members'][memberName]['offset']}
+            jsonStruct[memberName] = {'type': name,
+                                      'offset': struct['members'][memberName]['offset'],
+                                      'count': count}
 
             if variant == 'struct':
                 dependentTypes.append(name)
@@ -307,7 +356,7 @@ else:
     cacheFile.close()
 
 jsonStructure = generateJson(structs)
-jsonText = json.dumps(jsonStructure, sort_keys=True, indent=4, separators=(',', ': '))
+jsonText = json.dumps(jsonStructure, sort_keys=False, indent=4, separators=(',', ': '))
 
 file = open(args.o, 'w')
 file.write(jsonText)
